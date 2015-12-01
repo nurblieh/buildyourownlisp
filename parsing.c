@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 #include <editline/readline.h>
 
@@ -8,9 +9,8 @@
 
 #define LASSERT(args, cond, fmt, ...) \
   if (!(cond)) { \
-    lval_del(args); \
-    return lval_err(fmt, ##__VA_ARGS__); \
-  }
+    lval* err = lval_err(fmt, ##__VA_ARGS__); \
+    lval_del(args); return err; }
 
 #define LASSERT_TYPE(func, args, index, expect) \
   LASSERT(args, args->cell[index]->type == expect, \
@@ -31,7 +31,10 @@ typedef struct lval lval;
 typedef struct lenv lenv;
 
 /* Enum for lval type. */
-enum { LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_FUN, LVAL_SEXPR, LVAL_QEXPR };
+enum { LVAL_ERR,
+       LVAL_NUM, LVAL_SYM,
+       LVAL_FUN,
+       LVAL_SEXPR, LVAL_QEXPR };
 
 typedef lval*(*lbuiltin)(lenv*, lval*);
 
@@ -493,6 +496,122 @@ lval* builtin_join(lenv* e, lval* a) {
   return x;
 }
 
+lval* builtin_ord(lenv* e, lval* a, char* op) {
+  LASSERT_NUM(op, a, 2);
+  LASSERT_TYPE(op, a, 0, LVAL_NUM);
+  LASSERT_TYPE(op, a, 1, LVAL_NUM);
+
+  int r;
+  if (strcmp(op, ">") == 0) {
+    r = a->cell[0]->num > a->cell[1]->num;
+  }
+  if (strcmp(op, "<") == 0) {
+    r = a->cell[0]->num < a->cell[1]->num;
+  }
+  if (strcmp(op, ">=") == 0) {
+    r = a->cell[0]->num >= a->cell[1]->num;
+  }
+  if (strcmp(op, "<=") == 0) {
+    r = a->cell[0]->num <= a->cell[1]->num;
+  }
+  lval_del(a);
+  return lval_num(r);
+}
+
+lval* builtin_gt(lenv* e, lval* a) {
+  return builtin_ord(e, a, ">");
+}
+
+lval* builtin_lt(lenv* e, lval* a) {
+  return builtin_ord(e, a, "<");
+}
+
+lval* builtin_gte(lenv* e, lval* a) {
+  return builtin_ord(e, a, ">=");
+}
+
+lval* builtin_lte(lenv* e, lval* a) {
+  return builtin_ord(e, a, "<=");
+}
+
+/* Verify all aspects of two lvals are equal. */
+int lval_eq(lval* x, lval* y) {
+  if (x->type != y->type) { return false; }
+
+  /* Compare based on type. */
+
+  switch (x->type) {
+  case LVAL_NUM:
+    return (x->num == y->num);
+  case LVAL_ERR:
+    return strcmp(x->err, y->err);
+  case LVAL_SYM:
+    return strcmp(x->sym, y->sym);
+  case LVAL_FUN:
+    if (x->builtin || y->builtin) {
+      return x->builtin == y->builtin;
+    } else {
+      return lval_eq(x->formals, y->formals) &&
+        lval_eq(x->body, y->body);
+    }
+
+  case LVAL_QEXPR:
+  case LVAL_SEXPR:
+    if (x->count != y->count) { return false; }
+    for (int i = 0; i < x->count; i++) {
+      if (!lval_eq(x->cell[i], y->cell[i])) { return false; }
+    }
+    return true;
+    break;
+  }
+  return false;
+}
+
+lval* builtin_cmp(lenv* e, lval* a, char* op) {
+  LASSERT_NUM(op, a, 2);
+  
+  int r;
+  if (strcmp(op, "==") == 0) {
+    r = lval_eq(a->cell[0], a->cell[1]);
+  }
+  if (strcmp(op, "!=") == 0) {
+    r = !lval_eq(a->cell[0], a->cell[1]);
+  }
+  lval_del(a);
+  return lval_num(r);
+}
+
+lval* builtin_eq(lenv* e, lval* a) {
+  return builtin_cmp(e, a, "==");
+}
+
+lval* builtin_ne(lenv* e, lval* a) {
+  return builtin_cmp(e, a, "!=");
+}
+
+lval* builtin_if(lenv* e, lval* a) {
+  LASSERT_NUM("if", a, 3);
+  LASSERT_TYPE("if", a, 0, LVAL_NUM);
+  LASSERT_TYPE("if", a, 1, LVAL_QEXPR);
+  LASSERT_TYPE("if", a, 2, LVAL_QEXPR);
+
+  lval* x;
+  a->cell[1]->type = LVAL_SEXPR;
+  a->cell[2]->type = LVAL_SEXPR;
+  
+  if (a->cell[0]->num) {
+    /* If condition is true evaluate first expression */
+    x = lval_eval(e, lval_pop(a, 1));
+  } else {
+    /* Otherwise evaluate second expression */
+    x = lval_eval(e, lval_pop(a, 2));
+  }
+  
+  /* Delete argument list and return */
+  lval_del(a);
+  return x;
+}
+
 lval* builtin_op(lenv* e, lval* a, char* op) {
   /* Ensure all args are numbers. */
   for (int i = 0; i < a->count; i++) {
@@ -574,7 +693,7 @@ void lenv_add_builtin(lenv* e, char* name, lbuiltin func) {
 }
 
 void lenv_add_builtins(lenv* e) {
-  /* List Functions */
+  /* List Functions. */
   lenv_add_builtin(e, "list", builtin_list);
   lenv_add_builtin(e, "head", builtin_head);
   lenv_add_builtin(e, "tail", builtin_tail);
@@ -582,13 +701,26 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "join", builtin_join);
   lenv_add_builtin(e, "def",  builtin_def);
   lenv_add_builtin(e, "=",    builtin_put);
-  lenv_add_builtin(e, "\\",    builtin_lambda);
+  lenv_add_builtin(e, "\\",   builtin_lambda);
 
-  /* Mathematical Functions */
+  /* Mathematical Functions. */
   lenv_add_builtin(e, "+", builtin_add);
   lenv_add_builtin(e, "-", builtin_sub);
   lenv_add_builtin(e, "*", builtin_mul);
   lenv_add_builtin(e, "/", builtin_div);
+
+  /* Ordering Functions. */
+  lenv_add_builtin(e, ">",  builtin_gt);
+  lenv_add_builtin(e, "<",  builtin_lt);
+  lenv_add_builtin(e, ">=", builtin_gte);
+  lenv_add_builtin(e, "<=", builtin_lte);
+
+  /* Comparators. */
+  lenv_add_builtin(e, "==", builtin_eq);
+  lenv_add_builtin(e, "!=", builtin_ne);
+
+  /* If. */
+  lenv_add_builtin(e, "if", builtin_if);
 }
 
 
