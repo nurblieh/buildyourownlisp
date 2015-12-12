@@ -1,3 +1,7 @@
+/* Based entirely on http://www.buildyourownlisp.com/ . */
+/* Author for this version, nurblieh@gmail.com */
+/* TODO: Re-order function and struct definitions. */
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
